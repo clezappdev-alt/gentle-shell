@@ -9,8 +9,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { createGentleAiExtension } from "../extensions/gentle-ai.ts";
 import {
 	GENTLE_AI_DEV_BINARY_ENV,
+	GENTLE_AI_DEV_BINARY_OPT_IN_ENV,
 	gentleAiDevBinaryRegistrationPath,
+	registerGentleAiDevBinaryOptIn,
 	setGentleAiDevBinaryEnvironmentForTesting,
+	unregisterGentleAiDevBinaryOptIn,
 } from "../lib/gentle-ai-binary.ts";
 
 // Loud surfacing for the dev-binary override: while an override is active,
@@ -69,6 +72,10 @@ test("gentle:doctor and gentle:status surface the active dev-binary override lou
 			const { pi, commands } = harness();
 			createGentleAiExtension({ nativeReviewCli: null })(pi);
 			const cwd = await mkdtemp(join(tmpdir(), "gentle-pi-dev-cwd-"));
+			
+			// Explicitly opt-in to dev-binary override usage for this test
+			await registerGentleAiDevBinaryOptIn(true);
+			
 			const expected = `Gentle AI dev binary override active (unpinned, field-test only): ${devBinary} 9.9.9-dev+surface sha256:${sha256.slice(0, 16)}`;
 			for (const command of ["gentle:doctor", "gentle:status"]) {
 				const notifications: Array<{ message: string; severity: string }> = [];
@@ -76,6 +83,9 @@ test("gentle:doctor and gentle:status surface the active dev-binary override lou
 				assert.equal(notifications.length, 1, command);
 				assert.ok(notifications[0]!.message.includes(expected), `${command}: ${notifications[0]!.message}`);
 			}
+			
+			// Clean up opt-in registration
+			await unregisterGentleAiDevBinaryOptIn();
 		});
 	} finally {
 		if (previousAgentHome === undefined) delete process.env.GENTLE_PI_AGENT_HOME;
@@ -146,6 +156,17 @@ test("gentle:dev-binary registers, reports, and clears the persistent override",
 		assert.match(notifications[0]!.message, /no dev binary override/i);
 
 		notifications = [];
+		// Explicitly opt-in to dev-binary override usage for this test
+		await registerGentleAiDevBinaryOptIn(true);
+		await command!.handler(devBinary, contextFor(cwd, notifications));
+		assert.equal(existsSync(registrationPath), true);
+		assert.match(notifications[0]!.message, /dev binary override registered but opt-in disabled/);
+		assert.ok(notifications[0]!.message.includes(devBinary));
+		
+		// Now opt-in and verify it becomes active
+		await unregisterGentleAiDevBinaryOptIn(); // Clear previous opt-in
+		await registerGentleAiDevBinaryOptIn(true); // Set opt-in to true
+		notifications = [];
 		await command!.handler(devBinary, contextFor(cwd, notifications));
 		assert.equal(existsSync(registrationPath), true);
 		assert.match(notifications[0]!.message, /dev binary override active \(unpinned, field-test only\)/);
@@ -181,14 +202,61 @@ test("session start announces the active override once, loudly", async () => {
 			const sessionStart = handlers.get("session_start");
 			assert.equal(typeof sessionStart, "function");
 			const cwd = await mkdtemp(join(tmpdir(), "gentle-pi-dev-cwd-"));
+			
+			// Explicitly opt-in to dev-binary override usage for this test
+			await registerGentleAiDevBinaryOptIn(true);
+			
 			const notifications: Array<{ message: string; severity: string }> = [];
 			await sessionStart!({}, contextFor(cwd, notifications));
 			const expected = `Gentle AI dev binary override active (unpinned, field-test only): ${devBinary} 9.9.9-dev+surface sha256:${sha256.slice(0, 16)}`;
 			const announcement = notifications.find((entry) => entry.message.includes(expected));
 			assert.ok(announcement, JSON.stringify(notifications));
 			assert.equal(announcement!.severity, "warning");
+			
+			// Clean up opt-in registration
+			await unregisterGentleAiDevBinaryOptIn();
 		});
 	} finally {
+		if (previousAgentHome === undefined) delete process.env.GENTLE_PI_AGENT_HOME;
+		else process.env.GENTLE_PI_AGENT_HOME = previousAgentHome;
+	}
+});
+
+test("opted-out override is surfaced as a warning, not active or inactive", async () => {
+	const previousAgentHome = process.env.GENTLE_PI_AGENT_HOME;
+	process.env.GENTLE_PI_AGENT_HOME = await mkdtemp(join(tmpdir(), "gentle-pi-dev-agent-home-"));
+	const home = await mkdtemp(join(tmpdir(), "gentle-pi-dev-surface-home-"));
+	const bin = await mkdtemp(join(tmpdir(), "gentle-pi-dev-surface-bin-"));
+	const devBinary = join(bin, "gentle-ai");
+	writeFileSync(devBinary, "#!/bin/sh\necho 'gentle-ai 9.9.9-dev+surface'\n");
+	chmodSync(devBinary, 0o755);
+	const sha256 = createHash("sha256").update(readFileSync(devBinary)).digest("hex");
+	setGentleAiDevBinaryEnvironmentForTesting({ env: { [GENTLE_AI_DEV_BINARY_ENV]: devBinary }, home });
+	try {
+		const { pi, commands } = harness();
+		createGentleAiExtension({ nativeReviewCli: null })(pi);
+		const cwd = await mkdtemp(join(tmpdir(), "gentle-pi-dev-cwd-"));
+		
+		// Ensure opt-in is disabled (should be by default, but let's be explicit)
+		await unregisterGentleAiDevBinaryOptIn();
+		
+		const expected = `Gentle AI dev-binary override registered but opt-in disabled: ${devBinary} 9.9.9-dev+surface sha256:${sha256.slice(0, 16)}. Run \`gentle:dev-binary-mode enable\` to opt-in.`;
+		for (const command of ["gentle:doctor", "gentle:status"]) {
+			const notifications: Array<{ message: string; severity: string }> = [];
+			await commands.get(command)!.handler("", contextFor(cwd, notifications));
+			assert.equal(notifications.length, 1, command);
+			assert.ok(notifications[0]!.message.includes(expected), `${command}: ${notifications[0]!.message}`);
+			assert.equal(notifications[0]!.severity, "warning");
+		}
+		
+		// Test that gentle:dev-binary status also shows the opted-out state
+		const commandNotifications: Array<{ message: string; severity: string }> = [];
+		await commands.get("gentle:dev-binary")!.handler("status", contextFor(cwd, commandNotifications));
+		assert.equal(commandNotifications.length, 1);
+		assert.ok(commandNotifications[0]!.message.includes(expected));
+		assert.equal(commandNotifications[0]!.severity, "warning");
+	} finally {
+		setGentleAiDevBinaryEnvironmentForTesting(undefined);
 		if (previousAgentHome === undefined) delete process.env.GENTLE_PI_AGENT_HOME;
 		else process.env.GENTLE_PI_AGENT_HOME = previousAgentHome;
 	}

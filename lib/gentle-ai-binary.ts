@@ -208,6 +208,125 @@ export function unregisterGentleAiDevBinary(environment: GentleAiDevBinaryEnviro
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// Dev-binary opt-in — the safety mechanism for field-test lane.
+//
+// Two explicit activation paths, in precedence order:
+//   1. GENTLE_PI_GENTLE_AI_DEV_BINARY_OPT_IN (session override), then
+//   2. the persistent registration file at
+//      <GENTLE_PI_CONFIG_HOME|~/.pi/gentle-ai>/dev-binary-opt-in.json with the strict
+//      shape {"optIn":true}.
+//
+// The opt-in is deliberately simple: it's a boolean flag that gates whether
+// any registered dev-binary override will be used. When opt-in is not
+// enabled, registered dev-binary overrides are ignored and the pinned
+// binary is used instead. This prevents accidental use of dev-binary
+// overrides while still allowing intentional field-testing when explicitly
+// opted in.
+//
+// Guardrails: the opt-in registration must be valid JSON with a boolean
+// "optIn" field. Any failure is a typed error.
+// ---------------------------------------------------------------------------
+
+export const GENTLE_AI_DEV_BINARY_OPT_IN_ENV = "GENTLE_PI_GENTLE_AI_DEV_BINARY_OPT_IN";
+export const GENTLE_AI_DEV_BINARY_OPT_IN_REGISTRATION_SCHEMA = "gentle-pi.dev-binary-opt-in/v1";
+
+export class GentleAiDevBinaryOptInError extends Error {
+	constructor(origin: string, reason: string) {
+		super(`dev-binary-opt-in-invalid: ${origin} ${reason}. Fix or remove the opt-in declaration; the pinned binary is used while opt-in is not explicitly enabled.`);
+		this.name = "GentleAiDevBinaryOptInError";
+	}
+}
+
+export interface GentleAiDevBinaryOptIn {
+	source: "env" | "registration";
+	/** The env var name or registration file path that selected this opt-in state. */
+	origin: string;
+	optIn: boolean;
+}
+
+function gentleAiDevBinaryOptInRegistrationPath(environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment()): string {
+	const configHome = environment.env.GENTLE_PI_CONFIG_HOME ?? join(environment.home, ".pi", "gentle-ai");
+	return join(configHome, "dev-binary-opt-in.json");
+}
+
+function validateDevBinaryOptIn(source: "env" | "registration", origin: string, optIn: boolean): GentleAiDevBinaryOptIn {
+	return { source, origin, optIn };
+}
+
+function readDevBinaryOptInRegistration(registrationPath: string): boolean {
+	let contents: string;
+	try {
+		contents = readFileSync(registrationPath, "utf8");
+	} catch {
+		throw new GentleAiDevBinaryOptInError(registrationPath, "could not be read");
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(contents);
+	} catch {
+		throw new GentleAiDevBinaryOptInError(registrationPath, "is not valid JSON");
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new GentleAiDevBinaryOptInError(registrationPath, "must be a JSON object");
+	const record = parsed as Record<string, unknown>;
+	const keys = Object.keys(record).sort();
+	if (keys.length !== 2 || keys[0] !== "optIn" || keys[1] !== "schema") throw new GentleAiDevBinaryOptInError(registrationPath, `must carry exactly the keys "optIn" and "schema"`);
+	if (record.schema !== GENTLE_AI_DEV_BINARY_OPT_IN_REGISTRATION_SCHEMA) throw new GentleAiDevBinaryOptInError(registrationPath, `must declare schema ${GENTLE_AI_DEV_BINARY_OPT_IN_REGISTRATION_SCHEMA}`);
+	if (typeof record.optIn !== "boolean") throw new GentleAiDevBinaryOptInError(registrationPath, "must declare a boolean optIn value");
+	return record.optIn;
+}
+
+/**
+ * Resolves the active dev-binary opt-in state, if any. Returns { optIn: false } when
+ * neither activation path is present; a present-but-invalid opt-in always
+ * throws a typed GentleAiDevBinaryOptInError.
+ */
+export function resolveGentleAiDevBinaryOptIn(
+	environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment(),
+): GentleAiDevBinaryOptIn {
+	const envValue = environment.env[GENTLE_AI_DEV_BINARY_OPT_IN_ENV];
+	if (envValue !== undefined) {
+		const optIn = envValue === "1" || envValue.toLowerCase() === "true" || envValue.toLowerCase() === "yes" || envValue.toLowerCase() === "on";
+		return validateDevBinaryOptIn("env", GENTLE_AI_DEV_BINARY_OPT_IN_ENV, optIn);
+	}
+	const registrationPath = gentleAiDevBinaryOptInRegistrationPath(environment);
+	if (!existsSync(registrationPath)) return { source: "registration", origin: registrationPath, optIn: false };
+	const optIn = readDevBinaryOptInRegistration(registrationPath);
+	return validateDevBinaryOptIn("registration", registrationPath, optIn);
+}
+
+/**
+ * Cheap presence probe: is a dev-binary opt-in declared at all? Used by the
+ * native CLI to determine if opt-in capability is available.
+ * Declared-but-invalid still counts as configured — the resolution path will
+ * fail loudly with the typed error instead of quietly using the pin.
+ */
+export function gentleAiDevBinaryOptInConfigured(environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment()): boolean {
+	const envValue = environment.env[GENTLE_AI_DEV_BINARY_OPT_IN_ENV];
+	if (envValue !== undefined && envValue.length > 0) return true;
+	return existsSync(gentleAiDevBinaryOptInRegistrationPath(environment));
+}
+
+/** Validates and persistently registers dev-binary opt-in state; returns the fresh opt-in state. */
+export function registerGentleAiDevBinaryOptIn(
+	optIn: boolean,
+	environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment(),
+): { registrationPath: string; optIn: GentleAiDevBinaryOptIn } {
+	const registrationPath = gentleAiDevBinaryOptInRegistrationPath(environment);
+	const validated = validateDevBinaryOptIn("registration", registrationPath, optIn);
+	mkdirSync(dirname(registrationPath), { recursive: true });
+	writeFileSync(registrationPath, `${JSON.stringify({ schema: GENTLE_AI_DEV_BINARY_OPT_IN_REGISTRATION_SCHEMA, optIn })}\n`);
+	return { registrationPath, optIn: validated };
+}
+
+/** Deletes the persistent opt-in registration; returns whether one existed. */
+export function unregisterGentleAiDevBinaryOptIn(environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment()): boolean {
+	const registrationPath = gentleAiDevBinaryOptInRegistrationPath(environment);
+	if (!existsSync(registrationPath)) return false;
+	rmSync(registrationPath);
+	return true;
+}
+
 function isConfined(path: string, directory: string): boolean {
 	const relativePath = relative(directory, path);
 	return relativePath !== "" && !relativePath.startsWith("..") && !isAbsolute(relativePath);
@@ -274,12 +393,16 @@ export function resolveGentleAiBinary(
 	readBinary: (path: string) => Buffer = readFileSync,
 	environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment(),
 ): string {
-	// The explicit dev-binary override wins over the pinned supply-chain path.
+	// The explicit dev-binary override wins over the pinned supply-chain path
+	// only when dev-binary opt-in is explicitly enabled. This prevents accidental
+	// use of dev-binary overrides while allowing intentional field-testing.
 	// Its typed errors propagate: a declared override never falls back to the
-	// pin. Without a declared override this call returns undefined and the
-	// pinned resolution below is byte-identical to the pre-override behavior.
+	// pin when opt-in is enabled. Without a declared override or when opt-in
+	// is not enabled this call returns undefined and the pinned resolution
+	// below is byte-identical to the pre-override behavior.
 	const override = resolveGentleAiDevBinaryOverride(environment, platform);
-	if (override !== undefined) return override.path;
+	const optIn = resolveGentleAiDevBinaryOptIn(environment);
+	if (override !== undefined && optIn.optIn) return override.path;
 	const binaryPath = gentleAiBinaryPath(packageRoot, platform);
 	const versionDirectory = dirname(binaryPath);
 	const manifestPath = join(versionDirectory, "integrity.json");

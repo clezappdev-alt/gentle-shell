@@ -176,8 +176,12 @@ import {
 	registerGentleAiDevBinary,
 	resolveGentleAiBinary,
 	resolveGentleAiDevBinaryOverride,
+	resolveGentleAiDevBinaryOptIn,
+	registerGentleAiDevBinaryOptIn,
 	unregisterGentleAiDevBinary,
+	unregisterGentleAiDevBinaryOptIn,
 	type GentleAiDevBinaryOverride,
+	type GentleAiDevBinaryOptIn,
 } from "../lib/gentle-ai-binary.ts";
 import {
 	spawnTelemetryTrigger,
@@ -9500,6 +9504,7 @@ function createGentleAiExtensionForTesting(
 	const describeDevBinaryOverride = async (): Promise<
 		| { state: "inactive" }
 		| { state: "active"; line: string; override: GentleAiDevBinaryOverride }
+		| { state: "optedOut"; line: string; override: GentleAiDevBinaryOverride }
 		| { state: "invalid"; line: string }
 	> => {
 		let override: GentleAiDevBinaryOverride | undefined;
@@ -9510,6 +9515,25 @@ function createGentleAiExtensionForTesting(
 			throw error;
 		}
 		if (override === undefined) return { state: "inactive" };
+		
+		const optInState = resolveGentleAiDevBinaryOptIn();
+		if (!optInState.optIn) {
+			let version = "version unavailable";
+			try {
+				const adapter = createNodeExecFileAdapter();
+				const result = await adapter({ file: override.path, arguments: ["version"], cwd: dirname(override.path), timeoutMs: 10_000, maxBufferBytes: 1024 * 1024 });
+				const banner = result.stdout.trim();
+				if (result.exitCode === 0 && banner.startsWith("gentle-ai ")) version = banner.slice("gentle-ai ".length);
+			} catch {
+				// The doctor line still names the binary; the version stays unavailable.
+			}
+			return {
+				state: "optedOut",
+				override,
+				line: `Gentle AI dev-binary override registered but opt-in disabled: ${override.path} ${version} sha256:${override.sha256.slice(0, 16)}. Run \`gentle:dev-binary-mode enable\` to opt-in.`,
+			};
+		}
+		
 		let version = "version unavailable";
 		try {
 			const adapter = createNodeExecFileAdapter();
@@ -9539,6 +9563,7 @@ function createGentleAiExtensionForTesting(
 				if (argument === "" || argument === "status") {
 					const described = await describeDevBinaryOverride();
 					if (described.state === "inactive") ctx.ui.notify("No dev binary override; the pinned Gentle AI binary is active.", "info");
+					else if (described.state === "optedOut") ctx.ui.notify(described.line, "warning");
 					else ctx.ui.notify(described.line, described.state === "active" ? "warning" : "error");
 					return;
 				}
@@ -9573,6 +9598,7 @@ function createGentleAiExtensionForTesting(
 				"pass: Sensitive-path guard active for read/write/edit tools",
 				`${engramActive ? "pass" : "warn"}: Engram memory tools ${engramActive ? "active" : "not active in this session"}`,
 				...(devBinary.state === "active" ? [`warn: ${devBinary.line}`] : []),
+				...(devBinary.state === "optedOut" ? [`warn: ${devBinary.line}`] : []),
 				...(devBinary.state === "invalid" ? [`fail: ${devBinary.line}`, "remedy: fix the dev binary override or clear it with /gentle:dev-binary off (or unset GENTLE_PI_GENTLE_AI_DEV_BINARY)"] : []),
 			];
 			if (modelConfig.status === "invalid") {
@@ -9649,6 +9675,45 @@ function createGentleAiExtensionForTesting(
 					ctx.ui.notify("Gentle AI review mode is not available with the currently negotiated native version.", "info");
 					return;
 				}
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
+	const DEV_BINARY_MODE_OPERATION = {
+		STATUS: "status",
+		ENABLE: "enable",
+		DISABLE: "disable",
+	} as const;
+
+	pi.registerCommand("gentle:dev-binary-mode", {
+		description: "Show or set the Gentle AI dev-binary opt-in safety switch (status|enable|disable). Every sub-action is user-initiated only; Pi automation never toggles it.",
+		handler: async (args, ctx) => {
+			const subAction = args.trim().length === 0 ? DEV_BINARY_MODE_OPERATION.STATUS : args.trim();
+			if (subAction !== DEV_BINARY_MODE_OPERATION.STATUS && subAction !== DEV_BINARY_MODE_OPERATION.ENABLE && subAction !== DEV_BINARY_MODE_OPERATION.DISABLE) {
+				ctx.ui.notify(`Unknown /gentle:dev-binary-mode sub-action "${subAction}". Use status, disable, or enable.`, "warning");
+				return;
+			}
+			try {
+				const optInState = resolveGentleAiDevBinaryOptIn();
+				let effectiveOptIn = optInState.optIn;
+				let optInSource = optInState.source;
+				let optInOrigin = optInState.origin;
+				
+				if (subAction === DEV_BINARY_MODE_OPERATION.ENABLE) {
+					await registerGentleAiDevBinaryOptIn(true);
+					ctx.ui.notify("Gentle AI dev-binary opt-in enabled. Registered dev-binary overrides will now be used.", "info");
+					return;
+				}
+				if (subAction === DEV_BINARY_MODE_OPERATION.DISABLE) {
+					await unregisterGentleAiDevBinaryOptIn();
+					ctx.ui.notify("Gentle AI dev-binary opt-in disabled. Registered dev-binary overrides will be ignored; the pinned binary will be used.", "info");
+					return;
+				}
+				// status sub-action
+				const report = `dev-binary opt-in: ${effectiveOptIn ? "enabled" : "disabled"} (decided by ${optInSource})`;
+				ctx.ui.notify(report, effectiveOptIn ? "warning" : "info");
+			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
 		},
