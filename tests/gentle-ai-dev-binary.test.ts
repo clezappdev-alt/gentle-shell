@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	GENTLE_AI_DEV_BINARY_ENV,
+	GENTLE_AI_DEV_BINARY_OPT_IN_ENV,
 	GENTLE_AI_DEV_BINARY_OVERRIDE_INVALID_CODE,
 	GENTLE_AI_DEV_BINARY_REGISTRATION_SCHEMA,
 	GentleAiDevBinaryOverrideError,
@@ -56,7 +57,7 @@ test("the explicit env override resolves a verified dev binary and never changes
 	const bin = await scratch("gentle-pi-dev-bin-");
 	const packageRoot = await scratch("gentle-pi-dev-package-");
 	const devBinary = writeDevBinary(bin);
-	const env = environment(home, { [GENTLE_AI_DEV_BINARY_ENV]: devBinary });
+	const env = environment(home, { [GENTLE_AI_DEV_BINARY_ENV]: devBinary, [GENTLE_AI_DEV_BINARY_OPT_IN_ENV]: "1" });
 
 	const override = resolveGentleAiDevBinaryOverride(env, PLATFORM);
 	assert.equal(override?.source, "env");

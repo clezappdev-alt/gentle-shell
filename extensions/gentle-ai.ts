@@ -9530,7 +9530,7 @@ function createGentleAiExtensionForTesting(
 			return {
 				state: "optedOut",
 				override,
-				line: `Gentle AI dev-binary override registered but opt-in disabled: ${override.path} ${version} sha256:${override.sha256.slice(0, 16)}. Run \`gentle:dev-binary-mode enable\` to opt-in.`,
+				line: `Gentle AI dev binary override registered but opt-in disabled: ${override.path} ${version} sha256:${override.sha256.slice(0, 16)}. Run \`gentle:dev-binary-mode enable\` to opt-in.`,
 			};
 		}
 		
