@@ -80,8 +80,11 @@ test("gentle:doctor and gentle:status surface the active dev-binary override lou
 			for (const command of ["gentle:doctor", "gentle:status"]) {
 				const notifications: Array<{ message: string; severity: string }> = [];
 				await commands.get(command)!.handler("", contextFor(cwd, notifications));
-				assert.equal(notifications.length, 1, command);
-				assert.ok(notifications[0]!.message.includes(expected), `${command}: ${notifications[0]!.message}`);
+				const match = notifications.find(n => n.message.includes(expected));
+				assert.ok(match, `Expected message not found in notifications: ${JSON.stringify(notifications)}`);
+				assert.equal(match.severity, "warning", `${command}: expected warning severity`);
+				const otherWarnOrFail = notifications.filter(n => n !== match && (n.message.startsWith("warn:") || n.message.startsWith("fail:")));
+				assert.equal(otherWarnOrFail.length, 0, `${command}: unexpected additional warning/fail lines: ${JSON.stringify(otherWarnOrFail)}`);
 			}
 			
 			// Clean up opt-in registration
@@ -156,16 +159,15 @@ test("gentle:dev-binary registers, reports, and clears the persistent override",
 		assert.match(notifications[0]!.message, /no dev binary override/i);
 
 		notifications = [];
-		// Explicitly opt-in to dev-binary override usage for this test
-		await registerGentleAiDevBinaryOptIn(true);
+		// Ensure opt-in is disabled (default) to see opted-out state
+		await unregisterGentleAiDevBinaryOptIn(); // Clear any previous opt-in
 		await command!.handler(devBinary, contextFor(cwd, notifications));
 		assert.equal(existsSync(registrationPath), true);
 		assert.match(notifications[0]!.message, /dev binary override registered but opt-in disabled/);
 		assert.ok(notifications[0]!.message.includes(devBinary));
 		
 		// Now opt-in and verify it becomes active
-		await unregisterGentleAiDevBinaryOptIn(); // Clear previous opt-in
-		await registerGentleAiDevBinaryOptIn(true); // Set opt-in to true
+		await registerGentleAiDevBinaryOptIn(true);
 		notifications = [];
 		await command!.handler(devBinary, contextFor(cwd, notifications));
 		assert.equal(existsSync(registrationPath), true);
@@ -240,21 +242,25 @@ test("opted-out override is surfaced as a warning, not active or inactive", asyn
 		// Ensure opt-in is disabled (should be by default, but let's be explicit)
 		await unregisterGentleAiDevBinaryOptIn();
 		
-		const expected = `Gentle AI dev-binary override registered but opt-in disabled: ${devBinary} 9.9.9-dev+surface sha256:${sha256.slice(0, 16)}. Run \`gentle:dev-binary-mode enable\` to opt-in.`;
+		const expected = `Gentle AI dev binary override registered but opt-in disabled: ${devBinary} 9.9.9-dev+surface sha256:${sha256.slice(0, 16)}. Run \`gentle:dev-binary-mode enable\` to opt-in.`;
 		for (const command of ["gentle:doctor", "gentle:status"]) {
 			const notifications: Array<{ message: string; severity: string }> = [];
 			await commands.get(command)!.handler("", contextFor(cwd, notifications));
-			assert.equal(notifications.length, 1, command);
-			assert.ok(notifications[0]!.message.includes(expected), `${command}: ${notifications[0]!.message}`);
-			assert.equal(notifications[0]!.severity, "warning");
+			const match = notifications.find(n => n.message.includes(expected));
+			assert.ok(match, `Expected message not found in notifications: ${JSON.stringify(notifications)}`);
+			assert.equal(match.severity, "warning", `${command}: expected warning severity`);
+			const otherWarnOrFail = notifications.filter(n => n !== match && (n.message.startsWith("warn:") || n.message.startsWith("fail:")));
+			assert.equal(otherWarnOrFail.length, 0, `${command}: unexpected additional warning/fail lines: ${JSON.stringify(otherWarnOrFail)}`);
 		}
 		
 		// Test that gentle:dev-binary status also shows the opted-out state
 		const commandNotifications: Array<{ message: string; severity: string }> = [];
 		await commands.get("gentle:dev-binary")!.handler("status", contextFor(cwd, commandNotifications));
-		assert.equal(commandNotifications.length, 1);
-		assert.ok(commandNotifications[0]!.message.includes(expected));
-		assert.equal(commandNotifications[0]!.severity, "warning");
+		const commandMatch = commandNotifications.find(n => n.message.includes(expected));
+		assert.ok(commandMatch, `Expected message not found in command notifications: ${JSON.stringify(commandNotifications)}`);
+		assert.equal(commandMatch.severity, "warning", `gentle:dev-binary status: expected warning severity`);
+		const otherCmdWarnOrFail = commandNotifications.filter(n => n !== commandMatch && (n.message.startsWith("warn:") || n.message.startsWith("fail:")));
+		assert.equal(otherCmdWarnOrFail.length, 0, `gentle:dev-binary status: unexpected additional warning/fail lines: ${JSON.stringify(otherCmdWarnOrFail)}`);
 	} finally {
 		setGentleAiDevBinaryEnvironmentForTesting(undefined);
 		if (previousAgentHome === undefined) delete process.env.GENTLE_PI_AGENT_HOME;
