@@ -286,13 +286,16 @@ test("gentle:dev-binary-mode reports the measured opt-in, never the requested on
 	}
 });
 
-test("opted-out override is surfaced as a warning, not active or inactive", async () => {
+test("opted-out override is surfaced as a warning and is never executed", async () => {
 	const previousAgentHome = process.env.GENTLE_PI_AGENT_HOME;
 	process.env.GENTLE_PI_AGENT_HOME = await mkdtemp(join(tmpdir(), "gentle-pi-dev-agent-home-"));
 	const home = await mkdtemp(join(tmpdir(), "gentle-pi-dev-surface-home-"));
 	const bin = await mkdtemp(join(tmpdir(), "gentle-pi-dev-surface-bin-"));
 	const devBinary = join(bin, "gentle-ai");
-	writeFileSync(devBinary, "#!/bin/sh\necho 'gentle-ai 9.9.9-dev+surface'\n");
+	// Canary: this script leaves a marker behind if anything executes it, so the
+	// assertion is about real execution and not just about an absent version.
+	const executed = join(bin, "executed");
+	writeFileSync(devBinary, `#!/bin/sh\ntouch '${executed}'\necho 'gentle-ai 9.9.9-dev+surface'\n`);
 	chmodSync(devBinary, 0o755);
 	const sha256 = createHash("sha256").update(readFileSync(devBinary)).digest("hex");
 	setGentleAiDevBinaryEnvironmentForTesting({ env: { [GENTLE_AI_DEV_BINARY_ENV]: devBinary }, home });
@@ -304,15 +307,19 @@ test("opted-out override is surfaced as a warning, not active or inactive", asyn
 		// Ensure opt-in is disabled (should be by default, but let's be explicit)
 		await unregisterGentleAiDevBinaryOptIn();
 		
-		const expected = `Gentle AI dev binary override registered but opt-in disabled: ${devBinary} 9.9.9-dev+surface sha256:${sha256.slice(0, 16)}. Run \`gentle:dev-binary-mode enable\` to opt-in.`;
+		const expected = `Gentle AI dev binary override registered but opt-in disabled: ${devBinary} sha256:${sha256.slice(0, 16)}. Not executed while opt-in is disabled. Run \`gentle:dev-binary-mode enable\` to opt in.`;
 		for (const command of ["gentle:doctor", "gentle:status"]) {
 			const notifications: Array<{ message: string; severity: string }> = [];
 			await commands.get(command)!.handler("", contextFor(cwd, notifications));
 			const match = notifications.find(n => n.message.includes(expected));
 			assert.ok(match, `Expected message not found in notifications: ${JSON.stringify(notifications)}`);
 			assert.equal(match.severity, "warning", `${command}: expected warning severity`);
+			assert.doesNotMatch(match.message, /9\.9\.9-dev\+surface/, `${command}: the opted-out line must not carry a version obtained by execution`);
 			const otherWarnOrFail = notifications.filter(n => n !== match && (n.message.startsWith("warn:") || n.message.startsWith("fail:")));
 			assert.equal(otherWarnOrFail.length, 0, `${command}: unexpected additional warning/fail lines: ${JSON.stringify(otherWarnOrFail)}`);
+			// doctor and status are recovery tools: they must never run the very
+			// binary the operator opted out of.
+			assert.equal(existsSync(executed), false, `${command}: executed the opted-out dev binary`);
 		}
 		
 		// Test that gentle:dev-binary status also shows the opted-out state
@@ -321,8 +328,10 @@ test("opted-out override is surfaced as a warning, not active or inactive", asyn
 		const commandMatch = commandNotifications.find(n => n.message.includes(expected));
 		assert.ok(commandMatch, `Expected message not found in command notifications: ${JSON.stringify(commandNotifications)}`);
 		assert.equal(commandMatch.severity, "warning", `gentle:dev-binary status: expected warning severity`);
+		assert.doesNotMatch(commandMatch.message, /9\.9\.9-dev\+surface/, "gentle:dev-binary status: must not carry a version obtained by execution");
 		const otherCmdWarnOrFail = commandNotifications.filter(n => n !== commandMatch && (n.message.startsWith("warn:") || n.message.startsWith("fail:")));
 		assert.equal(otherCmdWarnOrFail.length, 0, `gentle:dev-binary status: unexpected additional warning/fail lines: ${JSON.stringify(otherCmdWarnOrFail)}`);
+		assert.equal(existsSync(executed), false, "gentle:dev-binary status: executed the opted-out dev binary");
 	} finally {
 		setGentleAiDevBinaryEnvironmentForTesting(undefined);
 		if (previousAgentHome === undefined) delete process.env.GENTLE_PI_AGENT_HOME;

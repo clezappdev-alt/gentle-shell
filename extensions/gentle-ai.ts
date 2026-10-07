@@ -9518,19 +9518,16 @@ function createGentleAiExtensionForTesting(
 		
 		const optInState = resolveGentleAiDevBinaryOptIn();
 		if (!optInState.optIn) {
-			let version = "version unavailable";
-			try {
-				const adapter = createNodeExecFileAdapter();
-				const result = await adapter({ file: override.path, arguments: ["version"], cwd: dirname(override.path), timeoutMs: 10_000, maxBufferBytes: 1024 * 1024 });
-				const banner = result.stdout.trim();
-				if (result.exitCode === 0 && banner.startsWith("gentle-ai ")) version = banner.slice("gentle-ai ".length);
-			} catch {
-				// The doctor line still names the binary; the version stays unavailable.
-			}
+			// Deliberately no execution here. doctor, status and dev-binary status
+			// are recovery tools: if the escape hatch ran the operator's opted-out,
+			// unpinned binary just to read a version string, a binary that hangs or
+			// crashes would take down the very command they would use to recover.
+			// Path and digest come from the already-validated override object and
+			// need no execution.
 			return {
 				state: "optedOut",
 				override,
-				line: `Gentle AI dev binary override registered but opt-in disabled: ${override.path} ${version} sha256:${override.sha256.slice(0, 16)}. Run \`gentle:dev-binary-mode enable\` to opt-in.`,
+				line: `Gentle AI dev binary override registered but opt-in disabled: ${override.path} sha256:${override.sha256.slice(0, 16)}. Not executed while opt-in is disabled. Run \`gentle:dev-binary-mode enable\` to opt in.`,
 			};
 		}
 		
