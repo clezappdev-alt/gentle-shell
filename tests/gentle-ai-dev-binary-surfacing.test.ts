@@ -224,6 +224,68 @@ test("session start announces the active override once, loudly", async () => {
 	}
 });
 
+// The registration file is not always in charge. The opt-in environment
+// variable wins unconditionally whenever it is present, so enable and disable
+// can both be no-ops. The command must report the MEASURED state and name the
+// deciding origin, never the state the operator merely requested.
+test("gentle:dev-binary-mode reports the measured opt-in, never the requested one", async () => {
+	const home = await mkdtemp(join(tmpdir(), "gentle-pi-dev-mode-home-"));
+	const { pi, commands } = harness();
+	createGentleAiExtension({ nativeReviewCli: null })(pi);
+	const cwd = await mkdtemp(join(tmpdir(), "gentle-pi-dev-cwd-"));
+	const command = commands.get("gentle:dev-binary-mode");
+	assert.ok(command, "gentle:dev-binary-mode command is registered");
+
+	// disable while the environment variable is enabling: the file it removes is
+	// not in charge, so the gate stays enabled and the command must say so.
+	setGentleAiDevBinaryEnvironmentForTesting({ env: { [GENTLE_AI_DEV_BINARY_OPT_IN_ENV]: "1" }, home });
+	try {
+		const notifications: Array<{ message: string; severity: string }> = [];
+		await command!.handler("disable", contextFor(cwd, notifications));
+		assert.equal(notifications.length, 1);
+		assert.match(notifications[0]!.message, /opt-in: enabled/, "disable must report the measured state, not the requested one");
+		assert.doesNotMatch(notifications[0]!.message, /opt-in: disabled/);
+		assert.match(notifications[0]!.message, new RegExp(`decided by env ${GENTLE_AI_DEV_BINARY_OPT_IN_ENV}`), "the deciding origin must be named");
+		assert.match(notifications[0]!.message, /takes precedence; unset it for this to take effect/, "a no-op must be actionable, never silent");
+		assert.equal(notifications[0]!.severity, "warning");
+	} finally {
+		setGentleAiDevBinaryEnvironmentForTesting(undefined);
+	}
+
+	// Symmetric case: enable while the environment variable is disabling.
+	setGentleAiDevBinaryEnvironmentForTesting({ env: { [GENTLE_AI_DEV_BINARY_OPT_IN_ENV]: "0" }, home });
+	try {
+		const notifications: Array<{ message: string; severity: string }> = [];
+		await command!.handler("enable", contextFor(cwd, notifications));
+		assert.match(notifications[0]!.message, /opt-in: disabled/, "enable must report the measured state, not the requested one");
+		assert.doesNotMatch(notifications[0]!.message, /opt-in: enabled/);
+		assert.match(notifications[0]!.message, new RegExp(`decided by env ${GENTLE_AI_DEV_BINARY_OPT_IN_ENV}`));
+		assert.match(notifications[0]!.message, /takes precedence; unset it for this to take effect/);
+		assert.equal(notifications[0]!.severity, "info");
+	} finally {
+		setGentleAiDevBinaryEnvironmentForTesting(undefined);
+	}
+
+	// With nothing in the environment, disable really disables and names the
+	// registration file it acted on.
+	setGentleAiDevBinaryEnvironmentForTesting({ env: {}, home });
+	try {
+		const notifications: Array<{ message: string; severity: string }> = [];
+		await command!.handler("disable", contextFor(cwd, notifications));
+		assert.match(notifications[0]!.message, /opt-in: disabled \(decided by registration/);
+		assert.doesNotMatch(notifications[0]!.message, /takes precedence/, "no override in play must not claim one");
+
+		// And enable still reports the truth when it does take effect.
+		const enabled: Array<{ message: string; severity: string }> = [];
+		await command!.handler("enable", contextFor(cwd, enabled));
+		assert.match(enabled[0]!.message, /opt-in: enabled \(decided by registration/);
+		assert.equal(enabled[0]!.severity, "warning");
+		await unregisterGentleAiDevBinaryOptIn();
+	} finally {
+		setGentleAiDevBinaryEnvironmentForTesting(undefined);
+	}
+});
+
 test("opted-out override is surfaced as a warning, not active or inactive", async () => {
 	const previousAgentHome = process.env.GENTLE_PI_AGENT_HOME;
 	process.env.GENTLE_PI_AGENT_HOME = await mkdtemp(join(tmpdir(), "gentle-pi-dev-agent-home-"));

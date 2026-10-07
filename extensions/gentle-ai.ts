@@ -9695,24 +9695,21 @@ function createGentleAiExtensionForTesting(
 				return;
 			}
 			try {
+				// The registration file is not always in charge: the environment
+				// variable wins unconditionally whenever it is present, so both
+				// enable and disable can be no-ops. Report the MEASURED state and
+				// name what decided it. Announcing the requested state instead is
+				// the lying escape hatch this gate exists to remove.
+				if (subAction === DEV_BINARY_MODE_OPERATION.ENABLE) await registerGentleAiDevBinaryOptIn(true);
+				else if (subAction === DEV_BINARY_MODE_OPERATION.DISABLE) await unregisterGentleAiDevBinaryOptIn();
+
 				const optInState = resolveGentleAiDevBinaryOptIn();
-				let effectiveOptIn = optInState.optIn;
-				let optInSource = optInState.source;
-				let optInOrigin = optInState.origin;
-				
-				if (subAction === DEV_BINARY_MODE_OPERATION.ENABLE) {
-					await registerGentleAiDevBinaryOptIn(true);
-					ctx.ui.notify("Gentle AI dev-binary opt-in enabled. Registered dev-binary overrides will now be used.", "info");
-					return;
-				}
-				if (subAction === DEV_BINARY_MODE_OPERATION.DISABLE) {
-					await unregisterGentleAiDevBinaryOptIn();
-					ctx.ui.notify("Gentle AI dev-binary opt-in disabled. Registered dev-binary overrides will be ignored; the pinned binary will be used.", "info");
-					return;
-				}
-				// status sub-action
-				const report = `dev-binary opt-in: ${effectiveOptIn ? "enabled" : "disabled"} (decided by ${optInSource})`;
-				ctx.ui.notify(report, effectiveOptIn ? "warning" : "info");
+				const decidedBy = ` (decided by ${optInState.source} ${optInState.origin})`;
+				// Never silently accept a no-op: say which input is in charge, and
+				// that unsetting it is what actually changes the outcome.
+				const superseded = optInState.source === "env" ? ` The ${optInState.origin} environment variable takes precedence; unset it for this to take effect.` : "";
+				const report = `dev-binary opt-in: ${optInState.optIn ? "enabled" : "disabled"}${decidedBy}.${superseded}`;
+				ctx.ui.notify(report, optInState.optIn ? "warning" : "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
