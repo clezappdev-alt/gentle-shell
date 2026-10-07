@@ -152,3 +152,38 @@ Both branches also edited the same line of `tests/gentle-ai-dev-binary.test.ts` 
 will conflict there. The intended end state is `6428b6cb` plus the `test-spike` test
 repairs, keeping the opted-in assertions.
 
+## Compatibility note for the upstream issue
+
+> Opt-in default false changes the behavior existing tests and operators relied on.
+> **7 test(s) updated to the new contract.**
+
+The gate was introduced by `92c39957`, not by this work, and it is the source of most of that
+count. It broke four tests that encoded the pre-opt-in contract, all confirmed red at
+`92c39957` before any change here (stash of the changed tracked files, single-file re-run):
+
+| Test | Introduced red by | Updated by |
+| --- | --- | --- |
+| `gentle-ai-dev-binary` explicit env override resolves | `92c39957` | `712f132c` |
+| `gentle-ai-binary` absolute package-local binary path | `92c39957` | `712f132c` |
+| `runtime-metrics-native` validated dev override reaches child | `92c39957` | `712f132c` |
+| `gentle-ai-dev-binary-surfacing` `gentle:dev-binary registers...` | `92c39957` | `d7c54d2e` (test-spike) |
+| `gentle-ai-dev-binary` invalid override sources fail closed | `712f132c` (kill switch) | `712f132c` |
+| `gentle-ai-dev-binary` malformed registration variants | `712f132c` (kill switch) | `712f132c` |
+| `runtime-metrics-native` invalid dev overrides fail closed | `712f132c` (kill switch) | `712f132c` |
+
+The last three are the operator-visible half of this decision: under the kill switch, an
+opted-out *invalid* declaration no longer throws, it resolves to the pin. An operator who
+previously relied on a broken `dev-binary.json` failing loudly will now silently get the pinned
+binary instead. The declaration is still surfaced as `invalid` by doctor and status, so it is
+not hidden, but the launch no longer fails. That is the intended trade and belongs in the
+issue's compatibility section verbatim.
+
+## Additional coverage
+
+`9bdeed48` adds the sibling direction the transport suite was missing: a registered override
+with opt-in left at its default false reaches the child as the pinned package-local binary and
+never as the declared override. It runs behind the repository's own `requireNativeBinary`
+gate (CI already arms `GENTLE_PI_REQUIRE_NATIVE_BINARY=1`), and it was mutation-verified:
+bypassing the opt-in gate fails this case and no other.
+
+
