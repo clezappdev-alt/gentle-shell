@@ -2,13 +2,30 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { readFileSync, realpathSync } from "node:fs";
-import { setGentleAiDevBinaryEnvironmentForTesting } from "../lib/gentle-ai-binary.ts";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { join } from "node:path";
+import { GENTLE_AI_VERSION, setGentleAiDevBinaryEnvironmentForTesting } from "../lib/gentle-ai-binary.ts";
+import { resolveGentleAiReleaseAsset } from "../scripts/gentle-ai-installer.mjs";
+import { requireNativeBinary } from "./support/native-binary-gate.ts";
 import * as native from "../lib/runtime-metrics-native.ts";
 import { parseAgentClass, type RuntimeMetricBucket } from "../lib/runtime-metrics.ts";
 import { createHash } from "node:crypto";
 import schema from "../contracts/telemetry/runtime-aggregate-v1.schema.json" with { type: "json" };
 import fixturePayloads from "./fixtures/runtime-metrics-native-batches.json" with { type: "json" };
+
+// Asserting that an opted-out override yields the pinned binary needs the real
+// package-local binary, so this one case runs behind the repository's own
+// native-binary gate: CI arms GENTLE_PI_REQUIRE_NATIVE_BINARY=1 and fails
+// loudly instead of skipping silently.
+const repoRuntimeBinary = join(import.meta.dirname, "..", ".gentle-ai", `v${GENTLE_AI_VERSION}`, process.platform === "win32" ? "gentle-ai.exe" : "gentle-ai");
+const releaseDigestsPinned = process.platform === "win32" || /^[0-9a-f]{64}$/.test(resolveGentleAiReleaseAsset(process.platform, process.arch).sha256);
+const nativeBinaryGate = requireNativeBinary({
+	resolvedBinary: existsSync(repoRuntimeBinary) ? repoRuntimeBinary : undefined,
+	digestsPinned: releaseDigestsPinned,
+	env: process.env,
+});
+if ("reason" in nativeBinaryGate) console.log(`runtime-metrics-native: ${nativeBinaryGate.reason}`);
+const pinnedBinaryTest = nativeBinaryGate.run ? test : test.skip;
 
 function source(): RuntimeMetricBucket {
 	const token = () => ({ reported: 1, unavailable: 0, unsupported: 0, sum: 7 });
@@ -210,6 +227,25 @@ test("validated dev override reaches the one-shot child through the production r
 		assert.equal(f.calls[0][0], file);
 		assert.deepEqual(f.calls[0][1], ["telemetry", "runtime", "send", "--json"]);
 		assert.equal(f.input(), fixturePayloads.batches[0]);
+	} finally {
+		setGentleAiDevBinaryEnvironmentForTesting(undefined);
+	}
+});
+
+pinnedBinaryTest("a registered dev override without opt-in launches the pinned binary, never the override", async () => {
+	const file = realpathSync(process.execPath);
+	// Registered but deliberately NOT opted in: opt-in defaults to false, so the
+	// production resolver must ignore the declaration and return the pin.
+	setGentleAiDevBinaryEnvironmentForTesting({ env: { GENTLE_PI_GENTLE_AI_DEV_BINARY: file }, home: "/unused" });
+	try {
+		const f = fixture();
+		const { resolve: _resolve, encode: _encode, ...deps } = f.deps;
+		const pending = native.sendNativeRuntimeEvent([source()], "/fixture", deps);
+		f.close();
+		assert.equal(await pending, "stored");
+		assert.equal(f.calls.length, 1);
+		assert.notEqual(f.calls[0][0], file, "an opted-out override must never reach the child");
+		assert.match(String(f.calls[0][0]), /\.gentle-ai[\\/]v\d+\.\d+\.\d+[\\/]gentle-ai(\.exe)?$/, "the transport must launch the pinned package-local binary");
 	} finally {
 		setGentleAiDevBinaryEnvironmentForTesting(undefined);
 	}
