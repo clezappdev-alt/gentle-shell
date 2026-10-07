@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync, execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtemp } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext, type SlashCommandInfo, type SourceInfo } from "@earendil-works/pi-coding-agent";
 import type { TUI, TuiMouseEvent } from "@earendil-works/pi-tui";
-import installGentleShell, { buildShellBarModel, createActiveProfileReader, changesShortcut, devBinaryCard, extractQueuedText, fetchCodexUsage, fetchNanUsage, loadFileDiff, shellGitRunner, openInExternalEditor, usageShortcut, type GentlePromptEditor } from "../extensions/gentle-shell.ts";
+import installGentleShell, { ambientDevBinary, buildShellBarModel, createActiveProfileReader, changesShortcut, devBinaryCard, extractQueuedText, fetchCodexUsage, fetchNanUsage, loadFileDiff, shellGitRunner, openInExternalEditor, usageShortcut, type GentlePromptEditor } from "../extensions/gentle-shell.ts";
 import { USAGE_SOURCE_EVENT, USAGE_SOURCE_SCHEMA } from "../lib/shell-usage.ts";
 import { CHANGE_STATUS } from "../lib/shell-changes.ts";
 import { sidebarState, type SidebarRail } from "../lib/shell-sidebar.ts";
 import type { ShellBarTheme } from "../lib/shell-bar.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
+import { GENTLE_AI_DEV_BINARY_ENV, GENTLE_AI_DEV_BINARY_OPT_IN_ENV, setGentleAiDevBinaryEnvironmentForTesting } from "../lib/gentle-ai-binary.ts";
 
 // The Gentle Shell extension wires the pure bar renderer into pi's footer
 // slot. These tests drive it with a fake ExtensionAPI and context.
@@ -2062,6 +2065,60 @@ test("gentleShell keeps a dev-binary override visible above the editor for the w
 	assert.equal(fresh.ui.widgets.has("gentle-shell-dev-binary"), false);
 
 	assert.equal(devBinaryCard({ state: "invalid", reason: "binary missing" }).tone, "error");
+});
+
+// The shell notice and gentle:doctor must never disagree about which binary is
+// answering. The opt-in gate decides that, so the notice consults it and uses
+// the same verdict doctor reports: optedOut, not "active".
+test("the shell dev-binary notice reports the opt-in verdict, so it cannot contradict gentle:doctor", async () => {
+	const home = await mkdtemp(join(tmpdir(), "gentle-shell-dev-binary-home-"));
+	const bin = await mkdtemp(join(tmpdir(), "gentle-shell-dev-binary-bin-"));
+	const devBinary = join(bin, "gentle-ai");
+	writeFileSync(devBinary, "#!/bin/sh\necho 'gentle-ai 9.9.9-dev+shell'\n");
+	if (process.platform !== "win32") chmodSync(devBinary, 0o755);
+	const sha256 = createHash("sha256").update(readFileSync(devBinary)).digest("hex");
+	const environment = { env: { [GENTLE_AI_DEV_BINARY_ENV]: devBinary } as Record<string, string | undefined>, home };
+
+	// Opt-in at its default false: the pin answers, so the notice must not claim active.
+	setGentleAiDevBinaryEnvironmentForTesting(environment);
+	try {
+		const optedOut = ambientDevBinary();
+		assert.equal(optedOut?.state, "optedOut");
+		assert.equal(optedOut?.state === "optedOut" && optedOut.path, devBinary);
+		const card = devBinaryCard(optedOut!);
+		assert.match(card.subtitle ?? "", /opt-in disabled/, "the card must name the verdict, not claim a dev binary is in use");
+		assert.match(card.body.join("\n"), /Pinned binary in use/);
+	} finally {
+		setGentleAiDevBinaryEnvironmentForTesting(undefined);
+	}
+
+	// Opted in: the dev binary really answers, so the notice is active.
+	setGentleAiDevBinaryEnvironmentForTesting({ ...environment, env: { ...environment.env, [GENTLE_AI_DEV_BINARY_OPT_IN_ENV]: "1" } });
+	try {
+		const active = ambientDevBinary();
+		assert.equal(active?.state, "active");
+		assert.equal(active?.state === "active" && active.sha256, sha256);
+		assert.equal(devBinaryCard(active!).subtitle, "dev binary override · field-test only");
+	} finally {
+		setGentleAiDevBinaryEnvironmentForTesting(undefined);
+	}
+
+	// An invalid declaration stays loud regardless of opt-in, matching doctor.
+	setGentleAiDevBinaryEnvironmentForTesting({ ...environment, env: { [GENTLE_AI_DEV_BINARY_ENV]: "/nonexistent/gentle-ai" } });
+	try {
+		assert.equal(ambientDevBinary()?.state, "invalid");
+		assert.equal(devBinaryCard({ state: "invalid", reason: "binary missing" }).tone, "error");
+	} finally {
+		setGentleAiDevBinaryEnvironmentForTesting(undefined);
+	}
+
+	// No declaration at all: the shell stays silent.
+	setGentleAiDevBinaryEnvironmentForTesting({ env: {}, home });
+	try {
+		assert.equal(ambientDevBinary(), undefined);
+	} finally {
+		setGentleAiDevBinaryEnvironmentForTesting(undefined);
+	}
 });
 
 test("gentle:commands registers alt+k by default", () => {

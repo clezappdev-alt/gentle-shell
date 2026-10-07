@@ -13,7 +13,7 @@ import { CARD_TONE, renderCard, type Card, type CardTheme } from "../lib/shell-c
 import { CommandPalette, commandsKey, type CommandPaletteResult } from "../lib/command-palette.ts";
 import { buildCommandPaletteGroups } from "../lib/command-palette-catalog.ts";
 import { agentsViewKey } from "../lib/agents-keys.ts";
-import { GentleAiDevBinaryOverrideError, resolveGentleAiDevBinaryOverride } from "../lib/gentle-ai-binary.ts";
+import { GentleAiDevBinaryOverrideError, resolveGentleAiDevBinaryOptIn, resolveGentleAiDevBinaryOverride } from "../lib/gentle-ai-binary.ts";
 import { DOUBLE_ESC_CANCEL_HINT, framePromptLines, IDLE_ESC_CLEAR_HINT, PROMPT_HINT, PROMPT_STATE, SHELL_PULSE_MS, withPromptHint, type PromptState } from "../lib/shell-prompt.ts";
 import { gentlePiConfigHome } from "../lib/agent-home.ts";
 import { resolveAnimationPolicy, writeAnimationPolicy, type AnimationPolicy } from "../lib/animation-policy.ts";
@@ -60,7 +60,7 @@ interface BuildOptions {
 	usage?: ProviderUsage;
 }
 
-export type DevBinaryNotice = { state: "active"; path: string; sha256: string } | { state: "invalid"; reason: string };
+export type DevBinaryNotice = { state: "active"; path: string; sha256: string } | { state: "optedOut"; path: string; sha256: string } | { state: "invalid"; reason: string };
 
 export interface ShellDeps {
 	activeProfile(): string | undefined;
@@ -96,10 +96,18 @@ export function createActiveProfileReader(env: NodeJS.ProcessEnv = process.env):
 	};
 }
 
-function ambientDevBinary(): DevBinaryNotice | undefined {
+/** Exported so the agreement with gentle:doctor's optedOut verdict is testable. */
+export function ambientDevBinary(): DevBinaryNotice | undefined {
 	try {
 		const override = resolveGentleAiDevBinaryOverride();
-		return override ? { state: "active", path: override.path, sha256: override.sha256 } : undefined;
+		if (override === undefined) return undefined;
+		// The opt-in gate decides which binary actually answers. Reporting
+		// "active" while the pin is in use would contradict gentle:doctor,
+		// which reports the same situation as optedOut. Both surfaces now use
+		// the same verdict, so they cannot disagree. Surfacing the declaration
+		// is still loud: doctor and status warn, and this card names the binary.
+		if (!resolveGentleAiDevBinaryOptIn().optIn) return { state: "optedOut", path: override.path, sha256: override.sha256 };
+		return { state: "active", path: override.path, sha256: override.sha256 };
 	} catch (error) {
 		if (error instanceof GentleAiDevBinaryOverrideError) return { state: "invalid", reason: error.message };
 		return undefined;
@@ -710,6 +718,14 @@ function spaced(component: { render(width: number): string[]; invalidate(): void
 export function devBinaryCard(notice: DevBinaryNotice): Card {
 	if (notice.state === "invalid") {
 		return { title: "Gentle AI", subtitle: "dev binary override invalid", body: [notice.reason], tone: CARD_TONE.ERROR };
+	}
+	if (notice.state === "optedOut") {
+		return {
+			title: "Gentle AI",
+			subtitle: "dev binary override registered · opt-in disabled",
+			body: [`${notice.path} · sha256:${notice.sha256.slice(0, SHA_PREFIX_LENGTH)}`, "Pinned binary in use. Run `gentle:dev-binary-mode enable` to opt in."],
+			tone: CARD_TONE.WARNING,
+		};
 	}
 	return {
 		title: "Gentle AI",
