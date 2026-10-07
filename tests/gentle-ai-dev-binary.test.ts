@@ -6,13 +6,16 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	GENTLE_AI_DEV_BINARY_ENV,
+	GENTLE_AI_DEV_BINARY_OPT_IN_ENV,
 	GENTLE_AI_DEV_BINARY_OVERRIDE_INVALID_CODE,
 	GENTLE_AI_DEV_BINARY_REGISTRATION_SCHEMA,
+	GentleAiDevBinaryOptInError,
 	GentleAiDevBinaryOverrideError,
 	PackageLocalGentleAiBinaryMissingError,
 	gentleAiDevBinaryRegistrationPath,
 	registerGentleAiDevBinary,
 	resolveGentleAiBinary,
+	resolveGentleAiDevBinaryOptIn,
 	resolveGentleAiDevBinaryOverride,
 	unregisterGentleAiDevBinary,
 	type GentleAiDevBinaryEnvironment,
@@ -62,7 +65,9 @@ test("the explicit env override resolves a verified dev binary and never changes
 	assert.equal(override?.source, "env");
 	assert.equal(override?.path, devBinary);
 	assert.match(override?.sha256 ?? "", /^[0-9a-f]{64}$/);
-	assert.equal(resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, env), devBinary);
+	// The override is only ever used once opt-in is enabled.
+	const optedIn = environment(home, { [GENTLE_AI_DEV_BINARY_ENV]: devBinary, [GENTLE_AI_DEV_BINARY_OPT_IN_ENV]: "1" });
+	assert.equal(resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, optedIn), devBinary);
 
 	const pinnedEnvironment = environment(home);
 	assert.equal(resolveGentleAiDevBinaryOverride(pinnedEnvironment, PLATFORM), undefined);
@@ -102,7 +107,10 @@ test("invalid override sources fail closed instead of silently falling back to t
 	for (const value of ["relative/gentle-ai", symlinked, nonExecutable, join(bin, "missing-gentle-ai")]) {
 		const env = environment(home, { [GENTLE_AI_DEV_BINARY_ENV]: value });
 		assert.throws(() => resolveGentleAiDevBinaryOverride(env, PLATFORM), isOverrideError(GENTLE_AI_DEV_BINARY_ENV), value);
-		assert.throws(() => resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, env), isOverrideError(GENTLE_AI_DEV_BINARY_ENV), value);
+		// Fail-closed is asserted in the opted-in state; opt-out is a kill switch
+		// that skips override resolution entirely.
+		const optedIn = environment(home, { [GENTLE_AI_DEV_BINARY_ENV]: value, [GENTLE_AI_DEV_BINARY_OPT_IN_ENV]: "1" });
+		assert.throws(() => resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, optedIn), isOverrideError(GENTLE_AI_DEV_BINARY_ENV), value);
 	}
 
 	const registrationPath = writeRegistration(home, "not-json\n");
@@ -140,8 +148,69 @@ test("malformed registration variants name their local registration path and nev
 		const registrationPath = writeRegistration(home, contents);
 		const env = environment(home);
 		assert.throws(() => resolveGentleAiDevBinaryOverride(env, PLATFORM), isOverrideError(registrationPath));
-		assert.throws(() => resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, env), isOverrideError(registrationPath));
+		// Fail-closed is asserted in the opted-in state; opt-out is a kill switch
+		// that skips override resolution entirely.
+		const optedIn = environment(home, { [GENTLE_AI_DEV_BINARY_OPT_IN_ENV]: "1" });
+		assert.throws(() => resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, optedIn), isOverrideError(registrationPath));
 	}
+});
+
+// Opt-in is a kill switch: it is evaluated before any override resolution, so a
+// declaration the operator has opted out of can never block the pinned binary.
+// A malformed declaration is still fail-loud the moment the operator opts in.
+test("opt-out never resolves the override, and a malformed declaration only fails closed when opted in", async () => {
+	const home = await scratch("gentle-pi-dev-home-");
+	const bin = await scratch("gentle-pi-dev-bin-");
+	const packageRoot = await scratch("gentle-pi-dev-package-");
+	const devBinary = writeDevBinary(bin);
+	const registrationPath = writeRegistration(home, "not-json\n");
+
+	// Opted out: the broken declaration is not consulted, so resolution reaches
+	// the pinned path and fails there instead of raising the override error.
+	const optedOut = environment(home);
+	assert.equal(resolveGentleAiDevBinaryOptIn(optedOut).optIn, false);
+	assert.throws(
+		() => resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, optedOut),
+		PackageLocalGentleAiBinaryMissingError,
+	);
+
+	// Opted in: the same declaration fails loudly and never falls back to the pin.
+	const optedIn = environment(home, { [GENTLE_AI_DEV_BINARY_OPT_IN_ENV]: "1" });
+	assert.equal(resolveGentleAiDevBinaryOptIn(optedIn).optIn, true);
+	assert.throws(
+		() => resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, optedIn),
+		isOverrideError(registrationPath),
+	);
+});
+
+test("a valid declaration is used only while opted in and never blocks the pin once opted out", async () => {
+	const home = await scratch("gentle-pi-dev-home-");
+	const bin = await scratch("gentle-pi-dev-bin-");
+	const packageRoot = await scratch("gentle-pi-dev-package-");
+	const devBinary = writeDevBinary(bin);
+	writeRegistration(home, registrationDocument(devBinary));
+
+	assert.throws(
+		() => resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, environment(home)),
+		PackageLocalGentleAiBinaryMissingError,
+	);
+	assert.equal(
+		resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, environment(home, { [GENTLE_AI_DEV_BINARY_OPT_IN_ENV]: "true" })),
+		devBinary,
+	);
+});
+
+test("a malformed opt-in declaration is surfaced before any override resolution", async () => {
+	const home = await scratch("gentle-pi-dev-home-");
+	const packageRoot = await scratch("gentle-pi-dev-package-");
+	const optInPath = join(home, ".pi", "gentle-ai", "dev-binary-opt-in.json");
+	mkdirSync(join(home, ".pi", "gentle-ai"), { recursive: true });
+	writeFileSync(optInPath, "not-json\n");
+
+	// No override is declared at all: the gate alone still fails loudly.
+	const env = environment(home);
+	assert.throws(() => resolveGentleAiDevBinaryOptIn(env), GentleAiDevBinaryOptInError);
+	assert.throws(() => resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, env), GentleAiDevBinaryOptInError);
 });
 
 test("registered binary replacement is observed on the next resolution", async () => {

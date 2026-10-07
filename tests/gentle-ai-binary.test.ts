@@ -8,6 +8,7 @@ import test from "node:test";
 import {
 	GENTLE_AI_BINARY_MISSING_CODE,
 	GENTLE_AI_DEV_BINARY_ENV,
+	GENTLE_AI_DEV_BINARY_OPT_IN_ENV,
 	GENTLE_AI_VERSION,
 	gentleAiDevBinaryRegistrationPath,
 	PackageLocalGentleAiBinaryMissingError,
@@ -130,12 +131,16 @@ verifiedBinaryTest("runtime resolves an absolute package-local binary path witho
 		else process.env[GENTLE_AI_DEV_BINARY_ENV] = ambientValue;
 	}
 
+	// An explicit declaration is only ever used while opt-in is enabled, so the
+	// opt-in gate is set alongside the env and registration declarations.
 	isolation.environment.env[GENTLE_AI_DEV_BINARY_ENV] = devBinary;
+	isolation.environment.env[GENTLE_AI_DEV_BINARY_OPT_IN_ENV] = "1";
 	assert.equal(resolveGentleAiBinary(packageRoot, process.platform), devBinary, "an explicit dev-binary test may opt in through the isolated environment seam");
 	delete isolation.environment.env[GENTLE_AI_DEV_BINARY_ENV];
 	registerGentleAiDevBinary(devBinary, isolation.environment);
 	assert.equal(resolveGentleAiBinary(packageRoot, process.platform), devBinary, "an explicit persistent dev registration may opt in through the isolated environment seam");
 	assert.equal(unregisterGentleAiDevBinary(isolation.environment), true);
+	delete isolation.environment.env[GENTLE_AI_DEV_BINARY_OPT_IN_ENV];
 
 	const resolved = resolveGentleAiBinary(packageRoot, process.platform);
 	assert.equal(resolved, binaryPath, "clearing the explicit registration restores the pinned resolver");

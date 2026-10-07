@@ -199,7 +199,7 @@ test("production encoder reaches the fake one-shot child without a test encoding
 
 test("validated dev override reaches the one-shot child through the production resolver", async () => {
 	const file = realpathSync(process.execPath);
-	setGentleAiDevBinaryEnvironmentForTesting({ env: { GENTLE_PI_GENTLE_AI_DEV_BINARY: file }, home: "/unused" });
+	setGentleAiDevBinaryEnvironmentForTesting({ env: { GENTLE_PI_GENTLE_AI_DEV_BINARY: file, GENTLE_PI_GENTLE_AI_DEV_BINARY_OPT_IN: "1" }, home: "/unused" });
 	try {
 		const f = fixture();
 		const { resolve: _resolve, encode: _encode, ...deps } = f.deps;
@@ -217,7 +217,9 @@ test("validated dev override reaches the one-shot child through the production r
 
 test("invalid dev overrides fail closed without spawning or falling back", async () => {
 	for (const file of ["relative-binary", realpathSync(new URL(".", import.meta.url))]) {
-		setGentleAiDevBinaryEnvironmentForTesting({ env: { GENTLE_PI_GENTLE_AI_DEV_BINARY: file }, home: "/unused" });
+		// Opted in: an invalid declaration must fail closed instead of silently
+		// dropping to the pinned binary, which would be a real launch.
+		setGentleAiDevBinaryEnvironmentForTesting({ env: { GENTLE_PI_GENTLE_AI_DEV_BINARY: file, GENTLE_PI_GENTLE_AI_DEV_BINARY_OPT_IN: "1" }, home: "/unused" });
 		try {
 			const f = fixture();
 			const { resolve: _resolve, ...deps } = f.deps;

@@ -393,16 +393,19 @@ export function resolveGentleAiBinary(
 	readBinary: (path: string) => Buffer = readFileSync,
 	environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment(),
 ): string {
-	// The explicit dev-binary override wins over the pinned supply-chain path
-	// only when dev-binary opt-in is explicitly enabled. This prevents accidental
-	// use of dev-binary overrides while allowing intentional field-testing.
-	// Its typed errors propagate: a declared override never falls back to the
-	// pin when opt-in is enabled. Without a declared override or when opt-in
-	// is not enabled this call returns undefined and the pinned resolution
-	// below is byte-identical to the pre-override behavior.
-	const override = resolveGentleAiDevBinaryOverride(environment, platform);
+	// Opt-in is a kill switch and is evaluated FIRST. When it is disabled the
+	// override is never resolved, so a malformed or broken declaration cannot
+	// block the pinned binary: opting out is a real escape hatch. Surfacing is
+	// unaffected, because describeDevBinaryOverride resolves the override on its
+	// own and keeps reporting the "invalid" state through gentle:doctor,
+	// gentle:status and gentle:dev-binary status either way.
+	// When opt-in IS enabled a declared override's typed errors propagate: a
+	// declared override never falls back to the pin.
 	const optIn = resolveGentleAiDevBinaryOptIn(environment);
-	if (override !== undefined && optIn.optIn) return override.path;
+	if (optIn.optIn) {
+		const override = resolveGentleAiDevBinaryOverride(environment, platform);
+		if (override !== undefined) return override.path;
+	}
 	const binaryPath = gentleAiBinaryPath(packageRoot, platform);
 	const versionDirectory = dirname(binaryPath);
 	const manifestPath = join(versionDirectory, "integrity.json");
